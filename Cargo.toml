@@ -1,0 +1,13 @@
+[package]
+name = "rusty_list"
+version = "0.1.0"
+edition = "2024"
+authors = ["Anthony Tropeano anthony@atropeano.com"]
+license ="MIT"
+description = "A no_std compatible, intrusive doubly linked list implementation."
+readme = "README.md"
+homepage = "https://github.com/iiTONELOC/rusty_list"
+repository = "https://github.com/iiTONELOC/rusty_list"
+keywords = ["no_std", "linked-list", "intrusive", "embedded", "kernel"]
+categories = ["no-std", "data-structures", "embedded"]
+exclude = ["target/*", ".gitignore", ".vscode/", "scripts/", "tests/"]
