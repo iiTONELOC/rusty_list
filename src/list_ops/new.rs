@@ -2,8 +2,8 @@ use core::marker::PhantomData;
 use crate::{RustyList, HasRustyNode, RustyListNode};
 
 impl<T> RustyListNode<T> {
-    /// Creates a new, non-dynamic list node with null prev/next.
-    pub fn new() -> Self {
+    /// Creates a new, non-dynamic list node with null prev/next (const version).
+    pub const fn new_const() -> Self {
         Self {
             dynamic: false,
             _marker: PhantomData,
@@ -12,7 +12,12 @@ impl<T> RustyListNode<T> {
         }
     }
 
-   /// Sets the `dynamic` property of the node and returns the modified instance.
+    /// Creates a new, non-dynamic list node with null prev/next.
+    pub fn new() -> Self {
+        Self::new_const() // You can even make the original call the const one
+    }
+
+    /// Sets the `dynamic` property of the node and returns the modified instance.
     pub fn with_dynamic(mut self, dynamic: bool) -> Self {
         self.dynamic = dynamic;
         self
