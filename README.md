@@ -2,6 +2,11 @@
 
 **RustyList** is a safe, intrusive doubly-linked list crate for Rust. It provides a way to embed list nodes directly within your data structures (similar to Linux kernel's `list_head`), allowing efficient in-place list management with no heap allocation. RustyList is **`#![no_std]`** compatible and ensures that all unsafe operations are confined internally, presenting a clean **100% safe** public API.
 
+## Screenshot
+
+![Threads - University of Arizona](./assets/dchains.webp)
+
+
 ## Features
 
 - **No Standard Library Required:** Designed for `#![no_std]` environments, ideal for embedded systems, kernels, and other low-level applications where heap allocation or the standard library may not be available. RustyList allocates no memory on its own.

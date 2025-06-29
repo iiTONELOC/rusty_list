@@ -44,6 +44,47 @@ impl<T> RustyList<T> {
         }
     }
 
+    unsafe fn insert_node_at_head(&mut self, node: *mut RustyListNode<T>) {
+        let new_node = unsafe { NonNull::new_unchecked(node) };
+        if self.len == 0 {
+            self.head = Some(new_node);
+            self.tail = Some(new_node);
+            unsafe {
+                (*node).prev = None;
+                (*node).next = None
+            };
+        } else {
+            // set the next pointer of the new node to the current head
+            unsafe { (*node).next = self.head };
+            // set the prev pointer of the current head to the new node
+            unsafe { (*self.head.unwrap().as_ptr()).prev = Some(new_node) };
+            // set the head pointer of the list to the new node
+            self.head = Some(new_node);
+            // set the prev pointer of the new node to None
+            unsafe { (*node).prev = None };
+        }
+    }
+
+    unsafe fn _insert_node_at_tail(&mut self, node: *mut RustyListNode<T>) {
+        let new_node = unsafe { NonNull::new_unchecked(node) };
+
+     
+
+        // set the next pointer of the current tail node to the new node
+        unsafe { (*self.tail.unwrap().as_ptr()).next = Some(new_node) };
+        // set the prev pointer of the new node to the current tail
+        unsafe { (*node).prev = Some(self.tail.unwrap()) };
+        // set the tail of the list to the new node
+        self.tail = Some(new_node);
+        // set the next pointer of the new node to None
+        unsafe { (*node).next = None };
+
+        // if the list has only one node, set the heads next pointer to the new node
+        if self.len == 1 {
+            unsafe { (*self.head.unwrap().as_ptr()).next = Some(new_node) };
+        }
+    }
+
     /// Unsafe internal function to insert a raw pointer into the `RustyList`.
     unsafe fn insert_raw(&mut self, item: *mut T) {
         if item.is_null() {
@@ -53,6 +94,7 @@ impl<T> RustyList<T> {
         // SAFETY: We are assuming that the item is valid and properly aligned.
         // We are also assuming that the offset is valid and that the item is a valid pointer to T.
         let node_ptr = unsafe { (item as *mut u8).add(self.offset) } as *mut RustyListNode<T>;
+        let item_container = unsafe { rusty_container_of(node_ptr, self.offset) };
 
         let node = unsafe { &mut *node_ptr };
         node.prev = None;
@@ -69,78 +111,65 @@ impl<T> RustyList<T> {
             node.prev = None;
             node.next = None;
         } else {
+            // list is not empty find the correct position to insert the new node
             let cmp_fn = self.order_function;
+            let mut current = self.head.unwrap().as_ptr();
 
-            // Insert at tail if no sort or item > tail
+            // if there is no order function OR the new node should be inserted at the tail
             if cmp_fn.is_none() || {
                 let tail_node = self.tail.unwrap().as_ptr();
                 let tail_item = unsafe { rusty_container_of(tail_node, self.offset) };
-                cmp_fn.unwrap()(item, tail_item) > 0
+                cmp_fn.unwrap()(item_container, tail_item) > 0
             } {
-                // Link new node to tail
-                // get the tail node pointer
-                let tail_ptr = self.tail.unwrap().as_ptr();
-                // set the next pointer of the tail node to the new node
-                unsafe { (*tail_ptr).next = Some(new_node) };
-                // set the prev pointer of the new node to the tail node
-                node.prev = Some(unsafe { NonNull::new_unchecked(tail_ptr) });
-                // set the tail pointer of the list to the new node
-                self.tail = Some(new_node);
-                // set the next pointer of the new node to None
-                node.next = None;
+                // Insert at tail
+                unsafe { self._insert_node_at_tail(node_ptr) };
             }
-            // Insert at head if item < head
+            // if we have an order function and the new node should be inserted at the head
             else if {
                 let head_node = self.head.unwrap().as_ptr();
                 let head_item = unsafe { rusty_container_of(head_node, self.offset) };
-                cmp_fn.unwrap()(item, head_item) < 0
+                cmp_fn.unwrap()(item_container, head_item) < 0
             } {
-                // Link new node to head
-                // get the head node pointer
-                let head_ptr = self.head.unwrap().as_ptr();
-                // set the prev pointer of the head node to the new node
-                unsafe { (*head_ptr).prev = Some(new_node) };
-                // set the next pointer of the new node to the head node
-                node.next = Some(unsafe { NonNull::new_unchecked(head_ptr) });
-                // set the head pointer of the list to the new node
-                self.head = Some(new_node);
-                // set the prev pointer of the new node to None
-                node.prev = None;
+                // Insert at head
+                unsafe { self.insert_node_at_head(node_ptr) };
             }
-            // Insert in the middle
+            // other wise we are inserting in the middle of the list
             else {
-                // hold the current node pointer
-                let mut current = self.head.unwrap().as_ptr();
+                while !current.is_null() {
+                    // look for a position to insert the new node
+                    let current_item = unsafe { rusty_container_of(current, self.offset) };
 
-                // traverse the list to find the right position
-                unsafe {
-                    while let Some(next_ptr) = (*current).next {
-                        // get the item pointer of the current node
-                        let current_item = rusty_container_of(current, self.offset);
-
-                        // if the item is less than the current item, break the loop
-                        if cmp_fn.unwrap()(item, current_item) < 0 {
-                            break;
-                        }
-                        // move to the next node
-                        current = next_ptr.as_ptr();
+                    // if the new item is less than the current item, break the loop
+                    if cmp_fn.unwrap()(item_container, current_item) < 0 {
+                        break;
                     }
+                    // move to the next node
+                    current = unsafe {
+                        match (*current).next {
+                            Some(next_node) => next_node.as_ptr(),
+                            None => core::ptr::null_mut(),
+                        }
+                    };
                 }
 
-                // get the previous node
-                let prev_ptr = unsafe { (*current).prev.unwrap().as_ptr() };
-
-                // set the next pointer of the new node to the current node
-                node.next = Some(unsafe { NonNull::new_unchecked(current) });
-                // set the prev pointer of the new node to the previous node
-                node.prev = Some(unsafe { NonNull::new_unchecked(prev_ptr) });
-                // set the next pointer of the previous node to the new node
-                unsafe { (*prev_ptr).next = Some(new_node) };
-                // set the prev pointer of the current node to the new node
-                unsafe { (*current).prev = Some(new_node) };
+                // check to see if current is null, this should not happen but just in case
+                if current.is_null() {
+                    // Insert at tail
+                    unsafe { self._insert_node_at_tail(node_ptr) };
+                } else {
+                    // Insert in the middle
+                    let prev_ptr = unsafe { (*current).prev.unwrap().as_ptr() };
+                    // set the pointer of the new node to the current node
+                    unsafe { (*node_ptr).next = Some(NonNull::new_unchecked(current)) };
+                    // set the prev pointer of the new node to the previous node
+                    unsafe { (*node_ptr).prev = Some(NonNull::new_unchecked(prev_ptr)) };
+                    // set the next pointer of the previous node to the new node
+                    unsafe { (*prev_ptr).next = Some(new_node) };
+                    // set the prev pointer of the current node to the new node
+                    unsafe { (*current).prev = Some(new_node) };
+                }
             }
         }
-
         self.len += 1;
     }
 }
@@ -218,11 +247,9 @@ mod tests {
             },
         };
 
-      
-            list.insert(&mut three);
-            list.insert(&mut one);
-            list.insert(&mut two);
-       
+        list.insert(&mut three);
+        list.insert(&mut one);
+        list.insert(&mut two);
 
         assert_eq!(list.len, 3);
 
