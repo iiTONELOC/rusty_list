@@ -1,108 +1,64 @@
-use crate::RustyList;
-use crate::HasRustyNode;
-use crate::rusty_container_of;
+use crate::{RustyList, RustyListNode, node_ref, rusty_container_of};
+use core::cmp::Ordering;
+use core::ptr::NonNull;
 
-impl<T: HasRustyNode> RustyList<T> {
-    /// Safe version of `find_equal`, compares items using the order function.
-    pub fn find_equal(&self, target: &T) -> Option<&mut T> {
-        let raw_ptr = target as *const T;
-        unsafe { self.find_equal_raw(raw_ptr).map(|p| &mut *p) }
+impl<'a, T, Tag> RustyList<'a, T, Tag> {
+    /// The first linked item the comparator reports equal to `target`.
+    /// `None` when nothing matches or the list has no comparator.
+    #[must_use]
+    pub fn find_equal(&self, target: &T) -> Option<&'a T> {
+        let node = self.find_node(target)?;
+        // SAFETY: the item is borrowed for `'a`, so a shared reference for `'a` is valid.
+        Some(unsafe { &*rusty_container_of(node, self.offset) })
     }
 
-    /// Internal unsafe implementation of find_equal
-    unsafe fn find_equal_raw(&self, target: *const T) -> Option<*mut T> {
-        if target.is_null() || self.len == 0 || self.order_function.is_none() {
-            return None;
-        }
-
-        let mut current = self.head.map(|nn| nn.as_ptr());
-
-        while let Some(node_ptr) = current {
-            let current_item = unsafe{rusty_container_of(node_ptr, self.offset)};
-            let cmp = self.order_function.unwrap()(current_item, target);
-
-            if cmp == 0 {
-                return Some(current_item as *mut T);
+    fn find_node(&self, target: &T) -> Option<NonNull<RustyListNode<T, Tag>>> {
+        let order = self.order_function?;
+        let mut current = self.head;
+        while let Some(node) = current {
+            // SAFETY: linked nodes lie inside items borrowed for `'a`.
+            let item = unsafe { &*rusty_container_of(node, self.offset) };
+            if order(item, target) == Ordering::Equal {
+                return Some(node);
             }
-
-            current = unsafe{(*node_ptr).next.map(|nn| nn.as_ptr())};
+            // SAFETY: `node` is linked, so it is live.
+            current = unsafe { node_ref(node) }.next.get();
         }
-
         None
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{RustyListNode, rusty_offset};
-
-    #[repr(C)]
-    #[derive(Debug, PartialEq)]
-    struct TestItem {
-        pub value: i32,
-        pub node: RustyListNode<TestItem>,
-    }
-
-    impl HasRustyNode for TestItem {
-        fn rusty_offset() -> usize {
-            rusty_offset(|x: &Self| &x.node)
-        }
-    }
-
-    fn cmp(a: *const TestItem, b: *const TestItem) -> i32 {
-        unsafe {
-            let a = &*a;
-            let b = &*b;
-            a.value.cmp(&b.value) as i32
-        }
-    }
-
-    fn make_item(val: i32) -> TestItem {
-        TestItem {
-            value: val,
-            node: RustyListNode::new(),
-        }
-    }
+    use crate::RustyList;
+    use crate::fixtures::{TestItem, cmp, make_item};
 
     #[test]
-    fn find_existing_node_by_value() {
+    fn find_returns_the_linked_item() {
         let mut list = RustyList::<TestItem>::new_with_order(cmp);
-
-        let mut a = make_item(1);
-        let mut b = make_item(2);
-        let mut c = make_item(3);
-
-        list.insert(&mut a);
-        list.insert(&mut b);
-        list.insert(&mut c);
-
-        let target = make_item(2);
-        let found = list.find_equal(&target);
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().value, 2);
+        let a = make_item(1);
+        let b = make_item(2);
+        let c = make_item(3);
+        assert_eq!(list.insert(&a), Ok(()));
+        assert_eq!(list.insert(&b), Ok(()));
+        assert_eq!(list.insert(&c), Ok(()));
+        let found = list.find_equal(&make_item(2)).unwrap();
+        assert!(core::ptr::eq(found, &b));
     }
 
     #[test]
     fn find_returns_none_for_missing_value() {
         let mut list = RustyList::<TestItem>::new_with_order(cmp);
-
-        let mut a = make_item(10);
-        let mut b = make_item(20);
-
-        list.insert(&mut a);
-        list.insert(&mut b);
-
-        let target = make_item(99);
-        let result = list.find_equal(&target);
-        assert!(result.is_none());
+        let a = make_item(1);
+        let b = make_item(2);
+        assert_eq!(list.insert(&a), Ok(()));
+        assert_eq!(list.insert(&b), Ok(()));
+        assert!(list.find_equal(&make_item(9)).is_none());
     }
 
     #[test]
-    fn find_in_empty_list() {
+    fn find_in_empty_list_returns_none() {
         let list = RustyList::<TestItem>::new_with_order(cmp);
-        let target = make_item(42);
-        let result = list.find_equal(&target);
-        assert!(result.is_none());
+        assert!(list.find_equal(&make_item(4)).is_none());
     }
 }

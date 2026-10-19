@@ -3,173 +3,245 @@
 #[cfg(test)]
 extern crate std;
 
-mod core_types;      // RustyListNode, RustyList, traits, offset helpers
-mod list_ops;        // insert, remove, pop, push, etc.
+mod core_types;
+mod list_ops;
 
-#[allow(unused_imports)]
 pub use core_types::*;
-#[allow(unused_imports)]
-pub use list_ops::{
-    insert::*,
-    remove::*,
-    find_equal::*,
-    pop::*,
-    push::*,
-};
+pub use list_ops::iter::Iter;
+
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use crate::{HasRustyNode, RustyList, RustyListNode};
+    use core::cmp::Ordering;
+    use std::vec::Vec;
+
+    #[derive(Debug, PartialEq)]
+    pub(crate) struct Alt;
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub(crate) struct TestItem {
+        pub(crate) value: i32,
+        pub(crate) node: RustyListNode<TestItem>,
+        pub(crate) alt: RustyListNode<TestItem, Alt>,
+    }
+
+    // SAFETY: `node` is the embedded `RustyListNode<Self>` and `offset_of!` reports its offset.
+    unsafe impl HasRustyNode for TestItem {
+        fn rusty_offset() -> usize {
+            core::mem::offset_of!(Self, node)
+        }
+    }
+
+    // SAFETY: `alt` is the embedded `RustyListNode<Self, Alt>` and `offset_of!` reports its offset.
+    unsafe impl HasRustyNode<Alt> for TestItem {
+        fn rusty_offset() -> usize {
+            core::mem::offset_of!(Self, alt)
+        }
+    }
+
+    pub(crate) fn cmp(a: &TestItem, b: &TestItem) -> Ordering {
+        a.value.cmp(&b.value)
+    }
+
+    pub(crate) const fn make_item(value: i32) -> TestItem {
+        TestItem {
+            value,
+            node: RustyListNode::new(),
+            alt: RustyListNode::new(),
+        }
+    }
+
+    pub(crate) fn values<Tag>(list: &RustyList<'_, TestItem, Tag>) -> Vec<i32> {
+        list.iter().map(|item| item.value).collect()
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::fixtures::{Alt, TestItem, cmp, make_item, values};
+    use super::{ListError, RustyList};
+    use core::cell::UnsafeCell;
     use std::vec;
 
-    #[repr(C)]
-    #[derive(Debug, PartialEq)]
-    struct TestItem {
-        value: i32,
-        node: RustyListNode<TestItem>,
-    }
-
-    impl HasRustyNode for TestItem {
-        fn rusty_offset() -> usize {
-            rusty_offset(|x: &Self| &x.node)
-        }
-    }
-
-    fn cmp(a: *const TestItem, b: *const TestItem) -> i32 {
-        unsafe { (*a).value.cmp(&(*b).value) as i32 }
-    }
-
-    fn make_item(val: i32) -> TestItem {
-        TestItem {
-            value: val,
-            node: RustyListNode::new(),
-        }
-    }
-
     #[test]
-    fn test_insert_sorted_and_order_is_correct() {
+    fn insert_sorted_keeps_order() {
         let mut list = RustyList::<TestItem>::new_with_order(cmp);
-        let mut items = [
-            make_item(30),
-            make_item(10),
-            make_item(50),
-            make_item(40),
-            make_item(20),
+        let items = [
+            make_item(3),
+            make_item(1),
+            make_item(5),
+            make_item(4),
+            make_item(2),
         ];
-
-        for item in &mut items {
-            list.insert(item);
+        for item in &items {
+            assert_eq!(list.insert(item), Ok(()));
         }
-
-        assert_eq!(list.len, 5);
-
-        let mut current = list.head;
-        let mut values = vec![];
-        while let Some(node) = current {
-            let item = unsafe { &*rusty_container_of(node.as_ptr(), list.offset) };
-            values.push(item.value);
-            current = unsafe { (*node.as_ptr()).next };
-        }
-
-        assert_eq!(values, vec![10, 20, 30, 40, 50]);
+        assert_eq!(list.len(), 5);
+        assert_eq!(values(&list), vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
-    fn test_find_equal_works() {
+    fn find_then_remove_unlinks_that_item() {
         let mut list = RustyList::<TestItem>::new_with_order(cmp);
-        let mut items = [
-            make_item(10),
-            make_item(20),
-            make_item(30),
-        ];
-
-        for item in &mut items {
-            list.insert(item);
+        let items = [make_item(1), make_item(2), make_item(3)];
+        for item in &items {
+            assert_eq!(list.insert(item), Ok(()));
         }
-
-        let target = make_item(20);
-        let result = list.find_equal(&target);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().value, 20);
+        let found = list.find_equal(&make_item(2)).unwrap();
+        assert!(core::ptr::eq(found, &items[1]));
+        assert_eq!(list.remove(found), Ok(()));
+        assert_eq!(list.len(), 2);
+        assert_eq!(values(&list), vec![1, 3]);
     }
 
     #[test]
-    fn test_remove_middle_node() {
-        let mut list = RustyList::<TestItem>::new_with_order(cmp);
-        let mut items = [
-            make_item(10),
-            make_item(20),
-            make_item(30),
-        ];
-
-        for item in &mut items {
-            list.insert(item);
-        }
-
-        let target = make_item(20);
-        let found_ptr = {
-            let temp = list.find_equal(&target).unwrap();
-            temp as *mut TestItem
-        };
-
-        list.remove(unsafe { &mut *found_ptr });
-
-        let mut current = list.head;
-        let mut values = vec![];
-        while let Some(node) = current {
-            let item = unsafe { &*rusty_container_of(node.as_ptr(), list.offset) };
-            values.push(item.value);
-            current = unsafe { (*node.as_ptr()).next };
-        }
-
-        assert_eq!(list.len, 2);
-        assert_eq!(values, vec![10, 30]);
-    }
-
-    #[test]
-    fn test_push_appends_to_tail() {
+    fn remove_then_reinsert_succeeds() {
         let mut list = RustyList::<TestItem>::new();
-        let mut a = make_item(1);
-        let mut b = make_item(2);
-
-        list.push(&mut a);
-        list.push(&mut b);
-
-        assert_eq!(list.len, 2);
-
-        let head_val = unsafe {
-            let node = list.head.unwrap().as_ptr();
-            (*rusty_container_of(node, list.offset)).value
-        };
-
-        let tail_val = unsafe {
-            let node = list.tail.unwrap().as_ptr();
-            (*rusty_container_of(node, list.offset)).value
-        };
-
-        assert_eq!(head_val, 1);
-        assert_eq!(tail_val, 2);
+        let a = make_item(1);
+        assert_eq!(list.push(&a), Ok(()));
+        assert_eq!(list.remove(&a), Ok(()));
+        assert!(list.is_empty());
+        assert_eq!(list.push(&a), Ok(()));
+        assert_eq!(list.len(), 1);
+        assert_eq!(values(&list), vec![1]);
     }
 
     #[test]
-    fn test_pop_removes_head_and_returns_correct_item() {
+    fn pop_then_push_succeeds() {
         let mut list = RustyList::<TestItem>::new();
-        let mut items = [make_item(10), make_item(20)];
+        let a = make_item(1);
+        assert_eq!(list.push(&a), Ok(()));
+        let popped = list.pop().unwrap();
+        assert!(list.is_empty());
+        assert_eq!(list.push(popped), Ok(()));
+        assert_eq!(values(&list), vec![1]);
+    }
 
-        list.push(&mut items[0]);
-        list.push(&mut items[1]);
+    #[test]
+    fn insert_without_order_appends() {
+        let mut list = RustyList::<TestItem>::new();
+        let items = [make_item(3), make_item(1), make_item(2)];
+        for item in &items {
+            assert_eq!(list.insert(item), Ok(()));
+        }
+        assert_eq!(values(&list), vec![3, 1, 2]);
+    }
 
-        let popped = list.pop();
-        assert!(popped.is_some());
-        assert_eq!(unsafe { (*popped.unwrap()).value }, 10);
-        assert_eq!(list.len, 1);
+    #[test]
+    fn equal_keys_insert_after_existing() {
+        let mut list = RustyList::<TestItem>::new_with_order(cmp);
+        let a = make_item(1);
+        let b = make_item(2);
+        let c = make_item(3);
+        let d = make_item(2);
+        assert_eq!(list.insert(&a), Ok(()));
+        assert_eq!(list.insert(&b), Ok(()));
+        assert_eq!(list.insert(&c), Ok(()));
+        assert_eq!(list.insert(&d), Ok(()));
+        assert_eq!(values(&list), vec![1, 2, 2, 3]);
+        let after_b = b.node.next.get().unwrap();
+        assert!(core::ptr::eq(after_b.as_ptr(), &raw const d.node));
+    }
 
-        let popped2 = list.pop();
-        assert!(popped2.is_some());
-        assert_eq!(unsafe { (*popped2.unwrap()).value }, 20);
-        assert_eq!(list.len, 0);
+    #[test]
+    fn pop_on_empty_returns_none() {
+        let mut list = RustyList::<TestItem>::new();
+        assert!(list.pop().is_none());
+    }
 
-        assert!(list.head.is_none());
-        assert!(list.tail.is_none());
+    #[test]
+    fn find_equal_without_order_returns_none() {
+        let mut list = RustyList::<TestItem>::new();
+        let a = make_item(1);
+        assert_eq!(list.push(&a), Ok(()));
+        assert!(list.find_equal(&make_item(1)).is_none());
+    }
+
+    #[test]
+    fn item_in_two_lists_at_once() {
+        let mut by_value = RustyList::<TestItem>::new_with_order(cmp);
+        let mut by_arrival = RustyList::<TestItem, Alt>::new();
+        let items = [make_item(3), make_item(1), make_item(2)];
+        for item in &items {
+            assert_eq!(by_value.insert(item), Ok(()));
+            assert_eq!(by_arrival.push(item), Ok(()));
+        }
+        assert_eq!(values(&by_value), vec![1, 2, 3]);
+        assert_eq!(values(&by_arrival), vec![3, 1, 2]);
+        assert_eq!(by_value.remove(&items[0]), Ok(()));
+        assert_eq!(values(&by_value), vec![1, 2]);
+        assert_eq!(values(&by_arrival), vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn insert_linked_item_is_refused() {
+        let mut first = RustyList::<TestItem>::new();
+        let mut second = RustyList::<TestItem>::new();
+        let a = make_item(1);
+        assert_eq!(first.push(&a), Ok(()));
+        assert_eq!(first.insert(&a), Err(ListError::AlreadyLinked));
+        assert_eq!(second.push(&a), Err(ListError::AlreadyLinked));
+        assert_eq!(first.len(), 1);
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn remove_unlinked_item_is_refused() {
+        let mut list = RustyList::<TestItem>::new();
+        let a = make_item(1);
+        let b = make_item(2);
+        assert_eq!(list.push(&a), Ok(()));
+        assert_eq!(list.remove(&b), Err(ListError::NotLinked));
+        assert_eq!(values(&list), vec![1]);
+    }
+
+    #[test]
+    fn remove_from_other_list_is_refused() {
+        let mut first = RustyList::<TestItem>::new();
+        let mut second = RustyList::<TestItem>::new();
+        let a = make_item(1);
+        let b = make_item(2);
+        let c = make_item(3);
+        assert_eq!(first.push(&a), Ok(()));
+        assert_eq!(first.push(&b), Ok(()));
+        assert_eq!(second.remove(&b), Err(ListError::NotLinked));
+        assert_eq!(second.push(&c), Ok(()));
+        assert_eq!(values(&first), vec![1, 2]);
+        assert_eq!(values(&second), vec![3]);
+        assert!(b.node.next.get().is_none());
+    }
+
+    struct SyncCell<T>(UnsafeCell<T>);
+
+    // SAFETY: each cell is used by one test, and that test runs on one thread.
+    unsafe impl<T> Sync for SyncCell<T> {}
+
+    static ITEMS: SyncCell<[TestItem; 3]> =
+        SyncCell(UnsafeCell::new([make_item(2), make_item(1), make_item(3)]));
+
+    static LIST: SyncCell<RustyList<'static, TestItem>> = SyncCell(UnsafeCell::new(RustyList {
+        id: usize::MAX,
+        len: 0,
+        dynamic: false,
+        head: None,
+        tail: None,
+        offset: core::mem::offset_of!(TestItem, node),
+        order_function: Some(cmp),
+        _items: core::marker::PhantomData,
+    }));
+
+    #[test]
+    fn static_storage_end_to_end() {
+        // SAFETY: the statics live for the whole program and only this test touches them.
+        let (items, list) = unsafe { (&*ITEMS.0.get(), &mut *LIST.0.get()) };
+        for item in items {
+            assert_eq!(list.insert(item), Ok(()));
+        }
+        assert_eq!(values(list), vec![1, 2, 3]);
+        for item in items {
+            assert_eq!(list.remove(item), Ok(()));
+        }
+        assert!(list.is_empty());
     }
 }

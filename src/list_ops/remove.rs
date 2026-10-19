@@ -1,120 +1,53 @@
-use crate::{RustyList, RustyListNode};
+use crate::{ListError, RustyList, RustyListNode, node_ref};
+use core::ptr::NonNull;
 
-impl<T> RustyList<T> {
-    /// Removes a node from the list.
+impl<T, Tag> RustyList<'_, T, Tag> {
+    /// Unlinks `item` from this list.
     ///
-    /// # Safety
-    /// - `item` must be a valid, non-null pointer to a `T` that contains a `RustyListNode<T>`.
-    /// - The `offset` field of the list must be correct.
-    pub fn remove(&mut self, item: &mut T) {
-        unsafe {
-            self.remove_raw(item as *mut T);
+    /// Refused when `item` is not linked, or is linked into a different list.
+    pub fn remove(&mut self, item: &T) -> Result<(), ListError> {
+        let node = self.node_of(item);
+        // SAFETY: `node` lies inside `item`, which is live for this call.
+        if unsafe { node_ref(node) }.owner.get() != self.id {
+            return Err(ListError::NotLinked);
         }
+        self.unlink(node);
+        self.len -= 1;
+        Ok(())
     }
 
-    /// Unsafe internal function to remove a raw pointer from the list.
-    unsafe fn remove_raw(&mut self, item: *mut T) {
-        if item.is_null() || self.len == 0 {
-            return;
-        }
-
-        // Get pointer to RustyListNode<T> inside item
-        let node_ptr = unsafe{(item as *mut u8).add(self.offset)} as *mut RustyListNode<T>;
-        let node =unsafe{ &mut *node_ptr};
-
-        let node_next = node.next.map(|nn| nn.as_ptr());
-        let node_prev = node.prev.map(|nn| nn.as_ptr());
-
-        // If this is the head
-        if self.head.map(|h| h.as_ptr()) == Some(node_ptr) {
-            // set the head pointer to the next node
-            self.head = node.next;
-            // If there is a next node, set its prev pointer to None
-            if let Some(new_head_ptr) = self.head {
-                unsafe {(*new_head_ptr.as_ptr()).prev = None};
+    pub(crate) fn unlink(&mut self, node: NonNull<RustyListNode<T, Tag>>) {
+        // SAFETY: `node` and its neighbors lie inside items borrowed for `'a`.
+        unsafe {
+            let prev = node_ref(node).prev.get();
+            let next = node_ref(node).next.get();
+            match prev {
+                Some(prev) => node_ref(prev).next.set(next),
+                None => self.head = next,
             }
-        }
-
-        // If this is the tail
-        if self.tail.map(|t| t.as_ptr()) == Some(node_ptr) {
-            // set the tail pointer to the prev node
-            self.tail = node.prev;
-            // If there is a prev node, set its next pointer to None
-            if let Some(new_tail_ptr) = self.tail {
-                unsafe {(*new_tail_ptr.as_ptr()).next = None};
+            match next {
+                Some(next) => node_ref(next).prev.set(prev),
+                None => self.tail = prev,
             }
-        }
-
-        // Middle node re-linking
-        // if the prev node exists, set its next pointer to the next node
-        if let Some(prev_ptr) = node_prev {
-            unsafe {(*prev_ptr).next = node.next};
-        }
-
-        // if the next node exists, set its prev pointer to the prev node
-        if let Some(next_ptr) = node_next {
-            unsafe{(*next_ptr).prev = node.prev};
-        }
-
-        // Clear the removed node's links
-        node.prev = None;
-        node.next = None;
-
-        // Decrement list length
-        self.len -= 1;
-
-        // Final cleanup if list is empty
-        if self.len == 0 {
-            self.head = None;
-            self.tail = None;
+            node_ref(node).clear_links();
         }
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
+    use crate::fixtures::{TestItem, cmp, make_item, values};
+    use crate::{ListError, RustyList, UNLINKED};
     use std::vec;
-    use crate::{RustyList, RustyListNode, HasRustyNode, rusty_offset};
-
-
-    #[repr(C)]
-    #[derive(Debug)]
-    struct TestItem {
-        pub value: i32,
-        pub node: RustyListNode<TestItem>,
-    }
-
-    impl HasRustyNode for TestItem {
-        fn rusty_offset() -> usize {
-            rusty_offset(|x: &Self| &x.node)
-        }
-    }
-
-    fn cmp(a: *const TestItem, b: *const TestItem) -> i32 {
-        unsafe { (*a).value.cmp(&(*b).value) as i32 }
-    }
-
-    fn make_item(val: i32) -> TestItem {
-        TestItem {
-            value: val,
-            node: RustyListNode::new(),
-        }
-    }
 
     #[test]
-    fn remove_only_node_resets_list() {
+    fn remove_only_node_empties_list() {
         let mut list = RustyList::<TestItem>::new();
-        let mut item = make_item(1);
-
-      
-            list.insert(&mut item);
-            assert_eq!(list.len, 1);
-            list.remove(&mut item);
-        
-
-        assert_eq!(list.len, 0);
+        let a = make_item(1);
+        assert_eq!(list.insert(&a), Ok(()));
+        assert_eq!(list.len(), 1);
+        assert_eq!(list.remove(&a), Ok(()));
+        assert!(list.is_empty());
         assert!(list.head.is_none());
         assert!(list.tail.is_none());
     }
@@ -122,66 +55,75 @@ mod tests {
     #[test]
     fn remove_head_preserves_tail() {
         let mut list = RustyList::<TestItem>::new();
-        let mut a = make_item(1);
-        let mut b = make_item(2);
-
-  
-            list.insert(&mut a);
-            list.insert(&mut b); // b should go after a
-            list.remove(&mut a);
-       
-
-        assert_eq!(list.len, 1);
-        let head = unsafe { &*list.head.unwrap().as_ptr() };
-        assert!(head.prev.is_none());
+        let a = make_item(1);
+        let b = make_item(2);
+        assert_eq!(list.insert(&a), Ok(()));
+        assert_eq!(list.insert(&b), Ok(()));
+        assert_eq!(list.remove(&a), Ok(()));
+        assert_eq!(values(&list), vec![2]);
+        assert_eq!(a.node.owner.get(), UNLINKED);
+        assert!(b.node.prev.get().is_none());
+        assert!(b.node.next.get().is_none());
     }
 
     #[test]
     fn remove_tail_preserves_head() {
         let mut list = RustyList::<TestItem>::new();
-        let mut a = make_item(1);
-        let mut b = make_item(2);
-
-        
-            list.insert(&mut a);
-            list.insert(&mut b);
-            list.remove(&mut b);
-      
-
-        assert_eq!(list.len, 1);
-        let tail = unsafe { &*list.tail.unwrap().as_ptr() };
-        assert!(tail.next.is_none());
+        let a = make_item(1);
+        let b = make_item(2);
+        assert_eq!(list.insert(&a), Ok(()));
+        assert_eq!(list.insert(&b), Ok(()));
+        assert_eq!(list.remove(&b), Ok(()));
+        assert_eq!(values(&list), vec![1]);
+        assert!(a.node.prev.get().is_none());
+        assert!(a.node.next.get().is_none());
     }
 
     #[test]
     fn remove_middle_preserves_links() {
         let mut list = RustyList::<TestItem>::new_with_order(cmp);
-        let mut a = make_item(1);
-        let mut b = make_item(2);
-        let mut c = make_item(3);
+        let a = make_item(1);
+        let b = make_item(2);
+        let c = make_item(3);
+        assert_eq!(list.insert(&a), Ok(()));
+        assert_eq!(list.insert(&b), Ok(()));
+        assert_eq!(list.insert(&c), Ok(()));
+        assert_eq!(list.remove(&b), Ok(()));
+        assert_eq!(list.len(), 2);
+        assert_eq!(values(&list), vec![1, 3]);
+        let before_c = c.node.prev.get().unwrap();
+        assert!(core::ptr::eq(before_c.as_ptr(), &raw const a.node));
+    }
 
-    
-            list.insert(&mut a);
-            list.insert(&mut b);
-            list.insert(&mut c);
-            assert_eq!(list.len, 3);
+    #[test]
+    fn remove_non_member_returns_not_linked() {
+        let mut list = RustyList::<TestItem>::new();
+        let a = make_item(1);
+        let b = make_item(2);
+        let c = make_item(3);
+        assert_eq!(list.push(&a), Ok(()));
+        assert_eq!(list.push(&b), Ok(()));
+        assert_eq!(list.remove(&c), Err(ListError::NotLinked));
+        assert_eq!(list.len(), 2);
+        assert_eq!(values(&list), vec![1, 2]);
+    }
 
-            list.remove(&mut b);
-        
+    #[test]
+    fn remove_from_empty_list_returns_not_linked() {
+        let mut list = RustyList::<TestItem>::new();
+        let a = make_item(1);
+        assert_eq!(list.remove(&a), Err(ListError::NotLinked));
+        assert!(list.is_empty());
+    }
 
-        assert_eq!(list.len, 2);
-
-        // walk head → tail
-        let mut vals = vec![];
-        let mut cursor = list.head;
-
-        while let Some(ptr) = cursor {
-            let item = unsafe { crate::rusty_container_of(ptr.as_ptr(), list.offset) };
-            vals.push(unsafe { (*item).value });
-            cursor = unsafe { (*ptr.as_ptr()).next };
-        }
-
-        assert_eq!(vals, vec![1, 3]);
+    #[test]
+    fn remove_without_order_works() {
+        let mut list = RustyList::<TestItem>::new();
+        let a = make_item(1);
+        let b = make_item(2);
+        assert_eq!(list.push(&a), Ok(()));
+        assert_eq!(list.push(&b), Ok(()));
+        assert_eq!(list.remove(&b), Ok(()));
+        assert_eq!(values(&list), vec![1]);
     }
 }
-
